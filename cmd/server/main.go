@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/armin/translator/internal/config"
 	"github.com/armin/translator/internal/db"
@@ -35,53 +36,71 @@ func main() {
 	}
 	defer pool.Close()
 
+	userRepo := repository.NewUserRepository(pool)
 	settingsRepo := repository.NewSettingsRepository(pool)
-	modelRepo := repository.NewModelCatalogRepository(pool)
-	operationRepo := repository.NewOperationCatalogRepository(pool)
-	translationRepo := repository.NewTranslationRepository(pool)
-	reviewRepo := repository.NewReviewRepository(pool)
+	historyRepo := repository.NewHistoryRepository(pool)
+	instructionRepo := repository.NewInstructionRepository(pool)
 
-	settingsService := service.NewSettingsService(settingsRepo, modelRepo)
-	operationService := service.NewOperationService(operationRepo)
-	instructionService := service.NewInstructionService(cfg.InstructionsDir)
-	openRouter := service.NewOpenRouterClient(cfg.OpenRouterAPIKey, "")
-	translationService := service.NewTranslationService(operationRepo, translationRepo, settingsService, instructionService, openRouter)
-	reviewService := service.NewReviewService(reviewRepo, translationRepo)
+	authService := service.NewAuthService(userRepo, cfg.JWTSecret)
+	settingsService := service.NewSettingsService(settingsRepo)
+	instructionService := service.NewInstructionService(instructionRepo)
+	openRouter := service.NewOpenRouterClient("")
+	transformService := service.NewTransformService(historyRepo, settingsService, instructionService, openRouter)
+	historyService := service.NewHistoryService(historyRepo)
+	statsService := service.NewStatsService(historyRepo)
 
-	if err := instructionService.EnsureDefaults(
-		[]string{"en_to_fa", "en_proofreading", "fa_to_en", "en_lexical_retrieval"},
-		defaultInstructions(),
-	); err != nil {
+	if err := authService.EnsureDefaultUser(ctx, cfg.DefaultUsername, cfg.DefaultPassword); err != nil {
+		log.Fatalf("default user: %v", err)
+	}
+	if err := instructionService.EnsureDefaults(ctx); err != nil {
 		log.Fatalf("instructions: %v", err)
 	}
 
-	h := handler.New(settingsService, operationService, translationService, reviewService, instructionService)
+	h := handler.New(authService, transformService, historyService, statsService, settingsService, instructionService)
 
 	router := gin.Default()
+	router.Use(cors.New(cors.Config{
+		AllowOrigins: []string{
+			"http://localhost:5173",
+			"http://127.0.0.1:5173",
+			"http://localhost:8082",
+			"http://127.0.0.1:8082",
+		},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Authorization", "Content-Type"},
+		AllowCredentials: true,
+	}))
+
 	router.GET("/api/v1/health", h.Health)
+	router.POST("/api/v1/auth/login", h.Login)
 
 	api := router.Group("/api/v1")
-	api.Use(middleware.Auth(cfg.APIToken))
+	api.Use(middleware.JWTAuth(authService))
 	{
-		api.GET("/operations", h.ListOperations)
-		api.POST("/translate", h.Translate)
-		api.GET("/translations", h.ListTranslations)
-		api.GET("/translations/:id", h.GetTranslation)
-		api.PATCH("/translations/:id", h.PatchTranslation)
+		api.POST("/transform", h.Transform)
+		api.GET("/history", h.ListHistory)
+		api.GET("/history/:id", h.GetHistory)
+		api.DELETE("/history/:id", h.DeleteHistory)
+		api.GET("/stats", h.GetStats)
 
-		api.GET("/instructions/:operation_id", h.GetInstructions)
-		api.PUT("/instructions/:operation_id", h.PutInstructions)
+		api.GET("/instructions", h.ListInstructions)
+		api.GET("/instructions/:key", h.GetInstruction)
+		api.PUT("/instructions/:key", h.PutInstruction)
 
 		api.GET("/settings", h.GetSettings)
 		api.PATCH("/settings", h.PatchSettings)
-		api.GET("/settings/models", h.ListModels)
-		api.POST("/settings/models", h.CreateModel)
-		api.PUT("/settings/models/:id", h.UpdateModel)
-		api.DELETE("/settings/models/:id", h.DeleteModel)
+		api.DELETE("/settings/data", h.ClearData)
+	}
 
-		api.POST("/reviews", h.CreateReview)
-		api.GET("/reviews", h.ListReviews)
-		api.GET("/reviews/:id", h.GetReview)
+	if _, err := os.Stat(cfg.StaticDir); err == nil {
+		router.Static("/assets", cfg.StaticDir+"/assets")
+		router.NoRoute(func(c *gin.Context) {
+			if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			c.File(cfg.StaticDir + "/index.html")
+		})
 	}
 
 	srv := &http.Server{
@@ -104,29 +123,5 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("shutdown: %v", err)
-	}
-}
-
-func defaultInstructions() map[string]struct{ Fixed, User string } {
-	jsonContract := `You must respond with ONLY valid JSON, no markdown fences:
-{"candidate1":"...","candidate2":"...","candidate3":"..."}`
-
-	return map[string]struct{ Fixed, User string }{
-		"en_to_fa": {
-			Fixed: jsonContract + "\n\nYou are a professional English-to-Persian translator. Provide three distinct, high-quality Persian translations.",
-			User:  "Prioritize natural Persian phrasing and preserve the original meaning.",
-		},
-		"en_proofreading": {
-			Fixed: jsonContract + "\n\nYou are an English proofreading specialist. Provide three improved versions of the input text.",
-			User:  "Focus on grammar, clarity, and professional tone while preserving intent.",
-		},
-		"fa_to_en": {
-			Fixed: jsonContract + "\n\nYou are a professional Persian-to-English translator. Provide three distinct, high-quality English translations.",
-			User:  "Prioritize natural English phrasing and preserve the original meaning.",
-		},
-		"en_lexical_retrieval": {
-			Fixed: jsonContract + "\n\nYou are an English lexical retrieval assistant. Given a semantic description, provide three candidate English words or short phrases.",
-			User:  "Each candidate should be a distinct term that best matches the description.",
-		},
 	}
 }

@@ -1,15 +1,15 @@
 package middleware
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/armin/translator/internal/domain"
+	"github.com/armin/translator/internal/service"
 )
 
-func Auth(apiToken string) gin.HandlerFunc {
+func JWTAuth(authService *service.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
@@ -21,14 +21,17 @@ func Auth(apiToken string) gin.HandlerFunc {
 		}
 
 		token := strings.TrimPrefix(auth, "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(apiToken)) != 1 {
+		claims, err := authService.ValidateToken(token)
+		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, domain.APIError{
-				Error: "invalid token",
+				Error: "invalid or expired token",
 				Code:  "UNAUTHORIZED",
 			})
 			return
 		}
 
+		c.Set("username", claims.Username)
+		c.Set("user_id", claims.UserID)
 		c.Next()
 	}
 }

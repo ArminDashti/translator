@@ -1,63 +1,105 @@
 package domain
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-type LLMModel struct {
+type User struct {
 	ID           uuid.UUID `json:"id"`
-	Slug         string    `json:"slug"`
-	OpenRouterID string    `json:"openrouter_id"`
-	DisplayName  string    `json:"display_name"`
-	IsActive     bool      `json:"is_active"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type AppSettings struct {
-	DefaultModelID *uuid.UUID `json:"default_model_id"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	OpenRouterAPIKey string    `json:"openrouter_api_key"`
+	ModelName        string    `json:"model_name"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
-type TranslationOperation struct {
-	ID          uuid.UUID `json:"id"`
-	Slug        string    `json:"slug"`
-	DisplayName string    `json:"display_name"`
-	Description *string   `json:"description,omitempty"`
-	IsActive    bool      `json:"is_active"`
-	CreatedAt   time.Time `json:"created_at"`
+type Instruction struct {
+	Key       string    `json:"key"`
+	Content   string    `json:"content"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type Translation struct {
-	ID                uuid.UUID `json:"id"`
-	OperationID       uuid.UUID `json:"operation_id"`
-	OperationSlug     string    `json:"operation_slug,omitempty"`
-	InputText         string    `json:"input_text"`
-	ModelID           uuid.UUID `json:"model_id"`
-	ModelSlug         string    `json:"model_slug,omitempty"`
-	Candidate1        string    `json:"candidate1"`
-	Candidate2        string    `json:"candidate2"`
-	Candidate3        string    `json:"candidate3"`
-	SelectedCandidate *int      `json:"selected_candidate"`
-	CreatedAt         time.Time `json:"created_at"`
+type HistoryType string
+
+const (
+	HistoryTypeSimplify HistoryType = "simplify"
+	HistoryTypeEnFa     HistoryType = "en_fa"
+	HistoryTypeFaEn     HistoryType = "fa_en"
+	HistoryTypeTermEn   HistoryType = "term_en"
+	HistoryTypeTermFa   HistoryType = "term_fa"
+	HistoryTypeRefine   HistoryType = "refine"
+	HistoryTypeSymptoms HistoryType = "symptoms"
+)
+
+func (t HistoryType) DisplayName() string {
+	switch t {
+	case HistoryTypeSimplify:
+		return "Simplify"
+	case HistoryTypeEnFa:
+		return "EN-FA"
+	case HistoryTypeFaEn:
+		return "FA-EN"
+	case HistoryTypeTermEn:
+		return "Term EN"
+	case HistoryTypeTermFa:
+		return "Term FA"
+	case HistoryTypeRefine:
+		return "Refine"
+	case HistoryTypeSymptoms:
+		return "Symptoms"
+	default:
+		return string(t)
+	}
 }
 
-type Review struct {
-	ID                uuid.UUID    `json:"id"`
-	TranslationID     uuid.UUID    `json:"translation_id"`
-	Rating            int          `json:"rating"`
-	Comment           *string      `json:"comment,omitempty"`
-	SelectedCandidate *int         `json:"selected_candidate,omitempty"`
-	CreatedAt         time.Time    `json:"created_at"`
-	Translation       *Translation `json:"translation,omitempty"`
+type HistoryRecord struct {
+	ID             uuid.UUID       `json:"id"`
+	Type           HistoryType     `json:"type"`
+	TypeDisplay    string          `json:"type_display"`
+	InputText      string          `json:"input_text"`
+	ResultText     string          `json:"result_text"`
+	Model          string          `json:"model"`
+	InstructionKey string          `json:"instruction_key"`
+	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	FormattedDate  string          `json:"formatted_date"`
 }
 
-type TranslationCandidates struct {
-	Candidate1 string `json:"candidate1"`
-	Candidate2 string `json:"candidate2"`
-	Candidate3 string `json:"candidate3"`
+type StatsBucket struct {
+	Simplify  int `json:"simplify"`
+	EnFa      int `json:"en_fa"`
+	FaEn      int `json:"fa_en"`
+	Term      int `json:"term"`
+	Refine    int `json:"refine"`
+	Symptoms  int `json:"symptoms"`
+	Total     int `json:"total"`
+}
+
+type StatsResponse struct {
+	Today     StatsBucket `json:"today"`
+	Yesterday StatsBucket `json:"yesterday"`
+	Week      StatsBucket `json:"week"`
+	Month     StatsBucket `json:"month"`
+	AllTime   StatsBucket `json:"all_time"`
+}
+
+type TransformResult struct {
+	ID             uuid.UUID   `json:"id"`
+	Type           HistoryType `json:"type"`
+	TypeDisplay    string      `json:"type_display"`
+	InputText      string      `json:"input_text"`
+	ResultText     string      `json:"result_text"`
+	Model          string      `json:"model"`
+	InstructionKey string      `json:"instruction_key"`
+	CreatedAt      time.Time   `json:"created_at"`
+	FormattedDate  string      `json:"formatted_date"`
 }
 
 type APIError struct {
@@ -65,7 +107,30 @@ type APIError struct {
 	Code  string `json:"code"`
 }
 
-type InstructionLayers struct {
-	Fixed string `json:"fixed"`
-	User  string `json:"user"`
+type LoginResponse struct {
+	Token    string `json:"token"`
+	Username string `json:"username"`
+}
+
+var InstructionKeys = []string{
+	"en-to-fa-general",
+	"en-to-fa-movie",
+	"en-to-fa-formal",
+	"en-to-fa-scientific",
+	"en-to-fa-music",
+	"fa-to-en-general",
+	"fa-to-en-formal",
+	"fa-to-en-scientific",
+	"simplify-en",
+	"refine-to-everyday",
+	"refine-to-formal",
+	"refine-to-slang",
+	"symptoms",
+	"term-for-everyday",
+	"term-for-formal",
+	"term-for-slang",
+}
+
+func FormatDateTime(t time.Time) string {
+	return t.Format("2006:01:02 15:04")
 }

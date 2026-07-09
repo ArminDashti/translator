@@ -1,84 +1,91 @@
 package service
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/armin/translator/internal/domain"
+	"github.com/armin/translator/internal/repository"
 )
 
 type InstructionService struct {
-	baseDir string
+	repo *repository.InstructionRepository
 }
 
-func NewInstructionService(baseDir string) *InstructionService {
-	return &InstructionService{baseDir: baseDir}
+func NewInstructionService(repo *repository.InstructionRepository) *InstructionService {
+	return &InstructionService{repo: repo}
 }
 
-func (s *InstructionService) EnsureDefaults(slugs []string, defaults map[string]struct{ Fixed, User string }) error {
-	for _, slug := range slugs {
-		for _, layer := range []string{"fixed", "user"} {
-			dir := filepath.Join(s.baseDir, layer)
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return fmt.Errorf("create instruction dir: %w", err)
-			}
-			path := filepath.Join(dir, slug+".md")
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				content := ""
-				if layer == "fixed" {
-					content = defaults[slug].Fixed
-				} else {
-					content = defaults[slug].User
-				}
-				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-					return fmt.Errorf("write default instruction: %w", err)
-				}
-			}
+func (s *InstructionService) EnsureDefaults(ctx context.Context) error {
+	for _, key := range domain.InstructionKeys {
+		existing, err := s.repo.Get(ctx, key)
+		if err == nil && existing != nil {
+			continue
+		}
+		if _, err := s.repo.Upsert(ctx, key, defaultInstructionContent(key)); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func (s *InstructionService) Get(slug string) (fixed, user string, err error) {
-	fixedBytes, err := os.ReadFile(s.fixedPath(slug))
-	if err != nil {
-		return "", "", fmt.Errorf("read fixed instruction: %w", err)
-	}
-	userBytes, err := os.ReadFile(s.userPath(slug))
-	if err != nil {
-		return "", "", fmt.Errorf("read user instruction: %w", err)
-	}
-	return string(fixedBytes), string(userBytes), nil
+func (s *InstructionService) List(ctx context.Context) ([]domain.Instruction, error) {
+	return s.repo.List(ctx)
 }
 
-func (s *InstructionService) BuildSystemPrompt(slug string) (string, error) {
-	fixed, user, err := s.Get(slug)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(fixed) + "\n\n" + strings.TrimSpace(user), nil
+func (s *InstructionService) Get(ctx context.Context, key string) (*domain.Instruction, error) {
+	return s.repo.Get(ctx, key)
 }
 
-func (s *InstructionService) Update(slug, layer, content string) error {
-	var path string
-	switch layer {
-	case "fixed":
-		path = s.fixedPath(slug)
-	case "user":
-		path = s.userPath(slug)
+func (s *InstructionService) Update(ctx context.Context, key, content string) (*domain.Instruction, error) {
+	return s.repo.Upsert(ctx, key, content)
+}
+
+func defaultInstructionContent(key string) string {
+	base := "Respond with only the final result text. No explanations, labels, or markdown."
+	switch key {
+	case "en-to-fa-general":
+		return base + "\n\nTranslate the English input into natural, everyday Persian."
+	case "en-to-fa-movie":
+		return base + "\n\nTranslate the English input into Persian dialogue suitable for the named movie's tone and era."
+	case "en-to-fa-formal":
+		return base + "\n\nTranslate the English input into formal, polished Persian."
+	case "en-to-fa-scientific":
+		return base + "\n\nTranslate the English input into accurate scientific Persian terminology."
+	case "en-to-fa-music":
+		return base + "\n\nTranslate the English input into lyrical Persian suitable for song lyrics."
+	case "fa-to-en-general":
+		return base + "\n\nTranslate the Persian input into natural, everyday English."
+	case "fa-to-en-formal":
+		return base + "\n\nTranslate the Persian input into formal, professional English."
+	case "fa-to-en-scientific":
+		return base + "\n\nTranslate the Persian input into accurate scientific English."
+	case "simplify-en":
+		return base + "\n\nSimplify the English sentence while preserving meaning."
+	case "refine-to-everyday":
+		return base + "\n\nRewrite the English sentence into clear everyday language."
+	case "refine-to-formal":
+		return base + "\n\nRewrite the English sentence into formal, professional English."
+	case "refine-to-slang":
+		return base + "\n\nRewrite the English sentence using casual slang while keeping the meaning."
+	case "symptoms":
+		return base + "\n\nList common symptoms, signs, and related context for the given English word or term."
+	case "term-for-everyday":
+		return base + "\n\nGiven a description, return the best matching word or short phrase in everyday language."
+	case "term-for-formal":
+		return base + "\n\nGiven a description, return the best matching formal word or short phrase."
+	case "term-for-slang":
+		return base + "\n\nGiven a description, return the best matching slang word or short phrase."
 	default:
-		return fmt.Errorf("invalid layer: %s", layer)
+		return base
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write instruction: %w", err)
-	}
-	return nil
 }
 
-func (s *InstructionService) fixedPath(slug string) string {
-	return filepath.Join(s.baseDir, "fixed", slug+".md")
-}
-
-func (s *InstructionService) userPath(slug string) string {
-	return filepath.Join(s.baseDir, "user", slug+".md")
+func (s *InstructionService) BuildPrompt(ctx context.Context, key string) (string, error) {
+	instruction, err := s.repo.Get(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("instruction %s: %w", key, err)
+	}
+	return strings.TrimSpace(instruction.Content), nil
 }

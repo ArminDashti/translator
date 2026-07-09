@@ -1,0 +1,9 @@
+{
+  "stackName": "translator",
+  "containerName": "translator",
+  "internalPort": "8080",
+  "apiImageTag": "translator-api:latest",
+  "webImageTag": "translator-web:latest",
+  "webPublishPort": "8082",
+  "apiPublishPort": "8080"
+}

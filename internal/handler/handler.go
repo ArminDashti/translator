@@ -13,25 +13,28 @@ import (
 )
 
 type Handler struct {
+	authService        *service.AuthService
+	transformService   *service.TransformService
+	historyService     *service.HistoryService
+	statsService       *service.StatsService
 	settingsService    *service.SettingsService
-	operationService   *service.OperationService
-	translationService *service.TranslationService
-	reviewService      *service.ReviewService
 	instructionService *service.InstructionService
 }
 
 func New(
+	authService *service.AuthService,
+	transformService *service.TransformService,
+	historyService *service.HistoryService,
+	statsService *service.StatsService,
 	settingsService *service.SettingsService,
-	operationService *service.OperationService,
-	translationService *service.TranslationService,
-	reviewService *service.ReviewService,
 	instructionService *service.InstructionService,
 ) *Handler {
 	return &Handler{
+		authService:        authService,
+		transformService:   transformService,
+		historyService:     historyService,
+		statsService:       statsService,
 		settingsService:    settingsService,
-		operationService:   operationService,
-		translationService: translationService,
-		reviewService:      reviewService,
 		instructionService: instructionService,
 	}
 }
@@ -44,25 +47,15 @@ func (h *Handler) handleError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, repository.ErrNotFound):
 		c.JSON(http.StatusNotFound, domain.APIError{Error: err.Error(), Code: "NOT_FOUND"})
-	case errors.Is(err, service.ErrNoDefaultModel):
-		c.JSON(http.StatusBadRequest, domain.APIError{Error: err.Error(), Code: "NO_DEFAULT_MODEL"})
-	case errors.Is(err, service.ErrModelInactive):
-		c.JSON(http.StatusBadRequest, domain.APIError{Error: err.Error(), Code: "MODEL_INACTIVE"})
+	case errors.Is(err, service.ErrInvalidCredentials):
+		c.JSON(http.StatusUnauthorized, domain.APIError{Error: err.Error(), Code: "INVALID_CREDENTIALS"})
 	default:
-		if err != nil && strings.Contains(err.Error(), "model not found") {
-			c.JSON(http.StatusBadRequest, domain.APIError{Error: err.Error(), Code: "MODEL_NOT_FOUND"})
-			return
-		}
-		if err != nil && err.Error() == "cannot delete default model; reassign default_model_id first" {
-			c.JSON(http.StatusBadRequest, domain.APIError{Error: err.Error(), Code: "DEFAULT_MODEL_DELETE"})
-			return
-		}
-		if err != nil && (strings.Contains(err.Error(), "parse candidates") || strings.Contains(err.Error(), "incomplete candidates")) {
-			c.JSON(http.StatusUnprocessableEntity, domain.APIError{Error: err.Error(), Code: "LLM_PARSE_FAILURE"})
-			return
-		}
 		if err != nil && strings.Contains(err.Error(), "openrouter") {
 			c.JSON(http.StatusBadGateway, domain.APIError{Error: err.Error(), Code: "OPENROUTER_ERROR"})
+			return
+		}
+		if err != nil && (strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid")) {
+			c.JSON(http.StatusBadRequest, domain.APIError{Error: err.Error(), Code: "VALIDATION_ERROR"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, domain.APIError{Error: err.Error(), Code: "INTERNAL_ERROR"})

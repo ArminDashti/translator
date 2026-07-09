@@ -9,10 +9,11 @@ import (
 
 type Config struct {
 	Port            string
-	APIToken        string
+	JWTSecret       string
 	DatabaseURL     string
-	OpenRouterAPIKey string
-	InstructionsDir string
+	StaticDir       string
+	DefaultUsername string
+	DefaultPassword string
 }
 
 func Load() (*Config, error) {
@@ -20,20 +21,18 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Port:            getEnv("PORT", "8080"),
-		APIToken:        os.Getenv("API_TOKEN"),
+		JWTSecret:       os.Getenv("JWT_SECRET"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		OpenRouterAPIKey: os.Getenv("OPENROUTER_API_KEY"),
-		InstructionsDir: getEnv("INSTRUCTIONS_DIR", "./instructions"),
+		StaticDir:       getEnv("STATIC_DIR", "./web/dist"),
+		DefaultUsername: getEnv("DEFAULT_USERNAME", "armin"),
+		DefaultPassword: getEnv("DEFAULT_PASSWORD", "Translator@2024"),
 	}
 
-	if cfg.APIToken == "" {
-		return nil, fmt.Errorf("API_TOKEN is required")
+	if cfg.JWTSecret == "" {
+		return nil, fmt.Errorf("JWT_SECRET is required")
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
-	}
-	if cfg.OpenRouterAPIKey == "" {
-		return nil, fmt.Errorf("OPENROUTER_API_KEY is required")
 	}
 
 	return cfg, nil
