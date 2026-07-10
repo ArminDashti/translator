@@ -21,6 +21,7 @@ translator/
 ├── Dockerfile                      # Multi-stage API + web image build
 ├── docker-compose.yml              # postgres + api + web services
 ├── nginx.conf.template             # nginx /api proxy to Go API
+├── build-docker-image.ps1          # Build API and/or web Docker images
 ├── run-on-docker.ps1               # Build and deploy Docker stack (local or SSH)
 ├── .dockerignore                   # Docker build context exclusions
 ├── go.mod                          # Go module definition

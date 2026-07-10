@@ -9,6 +9,7 @@ Unified Docker files at the **repo root** run API, web UI, and PostgreSQL togeth
 | `Dockerfile` | Multi-stage build: `api` target (Go) and `web` target (Vue + nginx) |
 | `docker-compose.yml` | `postgres` + `api` + `web` on external `translator-net` |
 | `nginx.conf.template` | Proxies `/api/` from web container to API |
+| `build-docker-image.ps1` | Build API and/or web Docker images locally |
 | `run-on-docker.ps1` | Local or SSH deploy script |
 | `.docker/stack.manifest.json` | Image tags, container names, ports |
 
@@ -19,6 +20,16 @@ Unified Docker files at the **repo root** run API, web UI, and PostgreSQL togeth
 | `postgres` | `translator-postgres` | — | Volume `postgres_data` |
 | `api` | `translator` | 8080 | Runs migrations on startup |
 | `web` | `translator-web` | 8082 | Serves static UI; proxies `/api/*` → `translator:8080` |
+
+## `build-docker-image.ps1`
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--target` | `all` | `api`, `web`, or `all` |
+| `--no-cache` | `no` | `yes` rebuilds without Docker cache |
+| `--compose-file` | `docker-compose.yml` | Compose file in repo root |
+
+Builds images via `docker compose build`. Image tags come from `.docker/stack.manifest.json` (defaults: `translator-api:latest`, `translator-web:latest`). Run the stack afterward with `run-on-docker.ps1`.
 
 ## `run-on-docker.ps1`
 
