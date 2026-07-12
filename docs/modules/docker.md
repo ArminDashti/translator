@@ -35,7 +35,7 @@ Builds images via `docker compose build`. Image tags come from `.docker/stack.ma
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--ssh-string` | — | Remote SSH target; omit for local Docker |
+| `--ssh-string` | — | SSH config alias only (script prepends `ssh`); omit for local Docker |
 | `--delete-volume` | `no` | `yes` removes volumes before recreate |
 | `--network` | `translator-net` | Docker network name |
 | `--api-host` | `translator` | API hostname for nginx proxy |

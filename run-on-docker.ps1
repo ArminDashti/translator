@@ -11,8 +11,8 @@
     the stack is recreated.
 
 .PARAMETER SshString
-    Remote connection string, e.g. "ssh server-name", "host@user@password",
-    or "host@port@user@password". When omitted, localhost Docker is used.
+    SSH config alias for remote Docker (e.g. example). The script prepends "ssh"
+    when connecting; do not include "ssh" in the value. When omitted, localhost Docker is used.
 
 .PARAMETER DeleteVolume
     Whether to remove data volumes before starting. Default: no.
@@ -36,7 +36,7 @@
     .\run-on-docker.ps1 --network=translator-net --api-host=translator --api-port=8080
 
 .EXAMPLE
-    .\run-on-docker.ps1 --ssh-string="ssh myvps"
+    .\run-on-docker.ps1 --ssh-string=example --delete-volume=no
 #>
 [CmdletBinding()]
 param(
@@ -73,12 +73,12 @@ function Show-RunOnDockerHelp {
 translator Docker run - build API + web images and start the Compose stack
 
 Usage:
-  .\run-on-docker.ps1 [--ssh-string=<connection>] [--delete-volume=<no|yes>] [--network=<name>] [--api-host=<name>] [--api-port=<port>]
+  .\run-on-docker.ps1 [--ssh-string=<alias>] [--delete-volume=<no|yes>] [--network=<name>] [--api-host=<name>] [--api-port=<port>]
 
 Arguments:
-  --ssh-string=<connection>   Remote target, e.g. "ssh server-name",
-                              host@user@password, or host@port@user@password.
-                              Builds images locally, transfers them to the server,
+  --ssh-string=<alias>        SSH config alias for remote Docker (e.g. example)
+                              The script prepends "ssh" when connecting; do not include "ssh"
+                              in the value. Builds images locally, transfers them to the server,
                               then starts compose remotely. When omitted, localhost Docker is used.
   --delete-volume=<no|yes>    Remove named volumes before starting (default: no)
   --network=<name>            Docker network for the stack (default: translator-net)
@@ -89,7 +89,8 @@ Examples:
   .\run-on-docker.ps1
   .\run-on-docker.ps1 --delete-volume=yes
   .\run-on-docker.ps1 --network=translator-net --api-port=8080
-  .\run-on-docker.ps1 --ssh-string="ssh myvps"
+  .\run-on-docker.ps1 --ssh-string=example
+  .\run-on-docker.ps1 --ssh-string=example --delete-volume=no
 
 Requires docker-compose.yml and Dockerfile in the repo root.
 Web UI: http://localhost:8082  |  API: http://localhost:8080
@@ -202,79 +203,42 @@ function Write-RunStep {
     Write-Host ("[{0}/{1}] {2}" -f $Step, $Total, $Message) -ForegroundColor Yellow
 }
 
-function Resolve-SshProfile {
-    param([string]$ConnectionString)
+function Resolve-SshTarget {
+    param([string]$SshString)
 
-    if ([string]::IsNullOrWhiteSpace($ConnectionString)) {
+    if ([string]::IsNullOrWhiteSpace($SshString)) {
         return [pscustomobject]@{
-            Mode     = 'local'
             IsLocal  = $true
-            Server   = $null
-            Username = $null
-            Password = $null
-            Port     = 22
             SshAlias = $null
         }
     }
 
-    $ConnectionString = $ConnectionString.Trim()
+    $alias = $SshString.Trim()
 
-    if ($ConnectionString -match '^(?i)ssh\s+(?<alias>.+)$') {
-        return [pscustomobject]@{
-            Mode     = 'ssh-alias'
-            IsLocal  = $false
-            Server   = $null
-            Username = $null
-            Password = $null
-            Port     = 22
-            SshAlias = $Matches['alias'].Trim()
-        }
+    if ($alias -match '^(?i)ssh(\s|$)') {
+        throw 'Invalid --ssh-string value. Pass only the SSH config alias (e.g. --ssh-string=example). Do not include "ssh".'
     }
 
-    $parts = $ConnectionString -split '@', 4
-    if ($parts.Count -eq 4) {
-        return [pscustomobject]@{
-            Mode     = 'remote-password'
-            IsLocal  = $false
-            Server   = $parts[0]
-            Port     = [int]$parts[1]
-            Username = $parts[2]
-            Password = $parts[3]
-            SshAlias = $null
-        }
-    }
-    if ($parts.Count -eq 3) {
-        return [pscustomobject]@{
-            Mode     = 'remote-password'
-            IsLocal  = $false
-            Server   = $parts[0]
-            Port     = 22
-            Username = $parts[1]
-            Password = $parts[2]
-            SshAlias = $null
-        }
+    if ([string]::IsNullOrWhiteSpace($alias)) {
+        throw 'Invalid --ssh-string value. Example: --ssh-string=example'
     }
 
-    throw "Invalid --ssh-string '$ConnectionString'. Use server@port@user@password, server@user@password, or 'ssh <alias>'."
-}
-
-function Ensure-PoshSshModule {
-    if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
-        throw 'Posh-SSH is required for password auth. Install-Module Posh-SSH -Scope CurrentUser'
+    return [pscustomobject]@{
+        IsLocal  = $false
+        SshAlias = $alias
     }
-    Import-Module Posh-SSH -ErrorAction Stop
 }
 
 function Invoke-RemoteShell {
     param(
-        [pscustomobject]$Profile,
+        [pscustomobject]$Target,
         [string]$Command,
         [string]$WorkingDirectory = $null
     )
 
     $remoteCommand = if ($WorkingDirectory) { "cd '$WorkingDirectory' && $Command" } else { $Command }
 
-    if ($Profile.IsLocal) {
+    if ($Target.IsLocal) {
         if ($WorkingDirectory) {
             Push-Location $WorkingDirectory
             try { Invoke-Expression $Command | Out-Null }
@@ -287,79 +251,41 @@ function Invoke-RemoteShell {
         return
     }
 
-    if ($Profile.Mode -eq 'ssh-alias') {
-        & ssh $Profile.SshAlias $remoteCommand
-    }
-    elseif ([string]::IsNullOrWhiteSpace($Profile.Password)) {
-        & ssh -p $Profile.Port -o StrictHostKeyChecking=accept-new "$($Profile.Username)@$($Profile.Server)" $remoteCommand
-    }
-    else {
-        Ensure-PoshSshModule
-        $credential = New-Object System.Management.Automation.PSCredential(
-            $Profile.Username,
-            (ConvertTo-SecureString $Profile.Password -AsPlainText -Force)
-        )
-        $session = New-SSHSession -ComputerName $Profile.Server -Port $Profile.Port -Credential $credential -AcceptKey -ErrorAction Stop
-        try {
-            $result = Invoke-SSHCommand -SessionId $session.SessionId -Command $remoteCommand -TimeOut 900
-            if ($result.ExitStatus -ne 0) { throw "Remote command failed: $($result.Error)`n$remoteCommand" }
-            if ($result.Output) { Write-Output ($result.Output -join [Environment]::NewLine) }
-        }
-        finally { Remove-SSHSession -SessionId $session.SessionId | Out-Null }
-        return
-    }
-
+    & ssh $Target.SshAlias $remoteCommand
     if ($LASTEXITCODE -ne 0) { throw "Remote command failed (exit $LASTEXITCODE): $remoteCommand" }
 }
 
 function Test-DockerCliAvailable {
-    param([pscustomobject]$Profile = $null)
+    param([pscustomobject]$Target = $null)
 
-    if ($null -eq $Profile -or $Profile.IsLocal) {
+    if ($null -eq $Target -or $Target.IsLocal) {
         & docker version | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Docker CLI is not available or not running.' }
         return
     }
 
-    Invoke-RemoteShell -Profile $Profile -Command 'docker version'
+    Invoke-RemoteShell -Target $Target -Command 'docker version'
 }
 
 function Copy-FileToRemote {
     param(
-        [pscustomobject]$Profile,
+        [pscustomobject]$Target,
         [string]$LocalPath,
         [string]$RemotePath
     )
 
-    if ($Profile.Mode -eq 'ssh-alias') {
-        & scp -o StrictHostKeyChecking=accept-new $LocalPath "$($Profile.SshAlias):$RemotePath"
-        if ($LASTEXITCODE -ne 0) { throw "Failed to copy '$LocalPath' to remote." }
-        return
-    }
-
-    $sshTarget = "$($Profile.Username)@$($Profile.Server)"
-    if ([string]::IsNullOrWhiteSpace($Profile.Password)) {
-        & scp -P $Profile.Port -o StrictHostKeyChecking=accept-new $LocalPath "${sshTarget}:$RemotePath"
-        if ($LASTEXITCODE -ne 0) { throw "Failed to copy '$LocalPath' to remote." }
-        return
-    }
-
-    Ensure-PoshSshModule
-    $credential = New-Object System.Management.Automation.PSCredential(
-        $Profile.Username,
-        (ConvertTo-SecureString $Profile.Password -AsPlainText -Force)
-    )
-    Set-SCPItem -ComputerName $Profile.Server -Port $Profile.Port -Credential $credential -Path $LocalPath -Destination $RemotePath -AcceptKey -Force
+    & scp -o StrictHostKeyChecking=accept-new $LocalPath "$($Target.SshAlias):$RemotePath"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to copy '$LocalPath' to remote." }
 }
 
 function Sync-DeployFilesToRemote {
     param(
-        [pscustomobject]$Profile,
+        [pscustomobject]$Target,
         [string]$LocalRoot,
         [string]$RemotePath
     )
 
-    Invoke-RemoteShell -Profile $Profile -Command "mkdir -p '$RemotePath' '$RemotePath/.docker'"
+    Invoke-RemoteShell -Target $Target -Command "mkdir -p '$RemotePath' '$RemotePath/.docker'"
 
     foreach ($relativePath in $Script:DeploySyncFiles) {
         $localPath = Join-Path $LocalRoot $relativePath
@@ -374,7 +300,7 @@ function Sync-DeployFilesToRemote {
             "$RemotePath/"
         }
 
-        Copy-FileToRemote -Profile $Profile -LocalPath $localPath -RemotePath $remoteTarget
+        Copy-FileToRemote -Target $Target -LocalPath $localPath -RemotePath $remoteTarget
     }
 }
 
@@ -443,7 +369,7 @@ function Export-LocalDockerImages {
 
 function Transfer-DockerImagesToRemote {
     param(
-        [pscustomobject]$Profile,
+        [pscustomobject]$Target,
         [string[]]$ImageTags,
         [string]$RemotePath,
         [string]$StackName
@@ -458,10 +384,10 @@ function Transfer-DockerImagesToRemote {
 
         $tarSizeMb = [math]::Round((Get-Item $localArchive).Length / 1MB, 1)
         Write-Host "Transferring images ($tarSizeMb MB) to remote host..." -ForegroundColor Cyan
-        Copy-FileToRemote -Profile $Profile -LocalPath $localArchive -RemotePath $remoteArchive
+        Copy-FileToRemote -Target $Target -LocalPath $localArchive -RemotePath $remoteArchive
 
         Write-Host 'Loading images on remote host...' -ForegroundColor Cyan
-        Invoke-RemoteShell -Profile $Profile -Command "docker load -i '$remoteArchive' && rm -f '$remoteArchive'"
+        Invoke-RemoteShell -Target $Target -Command "docker load -i '$remoteArchive' && rm -f '$remoteArchive'"
         Write-Host 'Images loaded on remote host.' -ForegroundColor Green
     }
     finally {
@@ -558,12 +484,12 @@ function Test-DockerComposeFile {
 
 function Ensure-DockerNetwork {
     param(
-        [pscustomobject]$Profile,
+        [pscustomobject]$Target,
         [string]$NetworkName,
         [string]$WorkingDirectory
     )
 
-    if ($Profile.IsLocal) {
+    if ($Target.IsLocal) {
         $existingNetworks = docker network ls --format '{{.Name}}'
         if ($LASTEXITCODE -ne 0) {
             throw 'Failed to list Docker networks. Is Docker running?'
@@ -579,7 +505,7 @@ function Ensure-DockerNetwork {
 
     $createCommand = "docker network inspect '$NetworkName' >/dev/null 2>&1 || docker network create '$NetworkName'"
     try {
-        Invoke-RemoteShell -Profile $Profile -Command $createCommand -WorkingDirectory $WorkingDirectory
+        Invoke-RemoteShell -Target $Target -Command $createCommand -WorkingDirectory $WorkingDirectory
     }
     catch {
         throw "Failed to ensure Docker network '$NetworkName': $($_.Exception.Message)"
@@ -588,7 +514,7 @@ function Ensure-DockerNetwork {
 
 function Invoke-ComposeStack {
     param(
-        [pscustomobject]$Profile,
+        [pscustomobject]$Target,
         [string]$WorkingDirectory,
         [bool]$RemoveVolumes,
         [bool]$Build,
@@ -602,7 +528,7 @@ function Invoke-ComposeStack {
     $buildFlag = if ($Build) { ' --build' } else { '' }
     $composeUp = "docker compose -f $Script:ComposeFile up -d$buildFlag"
 
-    if ($Profile.IsLocal) {
+    if ($Target.IsLocal) {
         Push-Location $WorkingDirectory
         try {
             Set-ComposeEnvironment -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber
@@ -620,14 +546,14 @@ function Invoke-ComposeStack {
     }
 
     try {
-        Invoke-RemoteShell -Profile $Profile -Command $composeDown -WorkingDirectory $WorkingDirectory
+        Invoke-RemoteShell -Target $Target -Command $composeDown -WorkingDirectory $WorkingDirectory
     }
     catch {
         Write-Host "Compose down skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
     $envPrefix = Get-RemoteComposeEnvironmentPrefix -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber
-    Invoke-RemoteShell -Profile $Profile -Command "${envPrefix}$composeUp" -WorkingDirectory $WorkingDirectory
+    Invoke-RemoteShell -Target $Target -Command "${envPrefix}$composeUp" -WorkingDirectory $WorkingDirectory
 }
 
 if ($Help -or $SshString -match '^(-help|--help|-\?|/\?)$') {
@@ -666,57 +592,57 @@ if ([string]::IsNullOrWhiteSpace($apiHostValue)) {
 }
 Test-PortNumber -Value $apiPortValue -ParameterName '--api-port'
 
-$profile = Resolve-SshProfile -ConnectionString $sshStringValue
-$workDir = if ($profile.IsLocal) { $ProjectRoot } else { Get-RemoteWorkDir -ProjectRoot $ProjectRoot }
+$target = Resolve-SshTarget -SshString $sshStringValue
+$workDir = if ($target.IsLocal) { $ProjectRoot } else { Get-RemoteWorkDir -ProjectRoot $ProjectRoot }
 $imageTags = Get-StackImageTags -ProjectRoot $ProjectRoot
 $stackManifest = Get-StackManifest -ProjectRoot $ProjectRoot
 $stackName = if ($stackManifest -and $stackManifest.stackName) { [string]$stackManifest.stackName } else { 'translator' }
 
-$targetLabel = if ($profile.IsLocal) { 'localhost' } elseif ($profile.Mode -eq 'ssh-alias') { "ssh $($profile.SshAlias)" } else { "$($profile.Username)@$($profile.Server)" }
+$targetLabel = if ($target.IsLocal) { 'localhost' } else { "ssh $($target.SshAlias)" }
 $volumeAction = if ($removeVolumes) { 'removing volumes' } else { 'keeping volumes' }
-$totalSteps = if ($profile.IsLocal) { 4 } else { 7 }
+$totalSteps = if ($target.IsLocal) { 4 } else { 7 }
 
 try {
-    $deployMode = if ($profile.IsLocal) { 'local Docker' } else { 'local build + image transfer' }
+    $deployMode = if ($target.IsLocal) { 'local Docker' } else { 'local build + image transfer' }
     Write-Host ("Target: {0} ({1}) | network: {2} | api: {3}:{4} | images: {5}, {6} | {7}" -f `
         $targetLabel, $deployMode, $networkValue, $apiHostValue, $apiPortValue, `
         $imageTags.ApiImageTag, $imageTags.WebImageTag, $volumeAction) -ForegroundColor Cyan
 
     Write-RunStep -Step 1 -Total $totalSteps -Message 'Checking Docker files'
     Test-DockerComposeFile -ProjectRoot $ProjectRoot
-    Test-DockerCliAvailable -Profile $profile
+    Test-DockerCliAvailable -Target $target
 
     Write-RunStep -Step 2 -Total $totalSteps -Message 'Building API and web images'
     Build-LocalDockerImages -ProjectRoot $ProjectRoot
 
-    if ($profile.IsLocal) {
+    if ($target.IsLocal) {
         Write-RunStep -Step 3 -Total $totalSteps -Message "Ensuring Docker network '$networkValue'"
-        Ensure-DockerNetwork -Profile $profile -NetworkName $networkValue -WorkingDirectory $workDir
+        Ensure-DockerNetwork -Target $target -NetworkName $networkValue -WorkingDirectory $workDir
 
         Write-RunStep -Step 4 -Total $totalSteps -Message $(if ($removeVolumes) { 'Recreating stack (volumes removed)' } else { 'Recreating stack (keeping volumes)' })
-        Invoke-ComposeStack -Profile $profile -WorkingDirectory $workDir -RemoveVolumes:$removeVolumes -Build:$false -NetworkName $networkValue -ApiHostName $apiHostValue -ApiPortNumber $apiPortValue
+        Invoke-ComposeStack -Target $target -WorkingDirectory $workDir -RemoveVolumes:$removeVolumes -Build:$false -NetworkName $networkValue -ApiHostName $apiHostValue -ApiPortNumber $apiPortValue
     }
     else {
         Write-RunStep -Step 3 -Total $totalSteps -Message "Syncing compose files to $targetLabel"
-        Sync-DeployFilesToRemote -Profile $profile -LocalRoot $ProjectRoot -RemotePath $workDir
+        Sync-DeployFilesToRemote -Target $target -LocalRoot $ProjectRoot -RemotePath $workDir
 
         Write-RunStep -Step 4 -Total $totalSteps -Message 'Transferring images to remote host'
-        Transfer-DockerImagesToRemote -Profile $profile -ImageTags @($imageTags.ApiImageTag, $imageTags.WebImageTag) -RemotePath $workDir -StackName $stackName
+        Transfer-DockerImagesToRemote -Target $target -ImageTags @($imageTags.ApiImageTag, $imageTags.WebImageTag) -RemotePath $workDir -StackName $stackName
 
         Write-RunStep -Step 5 -Total $totalSteps -Message 'Checking remote Docker'
-        Test-DockerCliAvailable -Profile $profile
+        Test-DockerCliAvailable -Target $target
 
         Write-RunStep -Step 6 -Total $totalSteps -Message "Ensuring Docker network '$networkValue'"
-        Ensure-DockerNetwork -Profile $profile -NetworkName $networkValue -WorkingDirectory $workDir
+        Ensure-DockerNetwork -Target $target -NetworkName $networkValue -WorkingDirectory $workDir
 
         Write-RunStep -Step 7 -Total $totalSteps -Message $(if ($removeVolumes) { 'Recreating stack (volumes removed)' } else { 'Recreating stack (keeping volumes)' })
-        Invoke-ComposeStack -Profile $profile -WorkingDirectory $workDir -RemoveVolumes:$removeVolumes -Build:$false -NetworkName $networkValue -ApiHostName $apiHostValue -ApiPortNumber $apiPortValue
+        Invoke-ComposeStack -Target $target -WorkingDirectory $workDir -RemoveVolumes:$removeVolumes -Build:$false -NetworkName $networkValue -ApiHostName $apiHostValue -ApiPortNumber $apiPortValue
     }
 
     Write-Progress -Activity 'translator Docker run' -Completed -Status 'Done'
     Write-Host ''
 
-    if ($profile.IsLocal) {
+    if ($target.IsLocal) {
         Write-Host 'Stack is running on localhost.' -ForegroundColor Green
         Write-Host '  Web UI: http://localhost:8082' -ForegroundColor Green
         Write-Host '  API:    http://localhost:8080' -ForegroundColor Green
