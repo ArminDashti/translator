@@ -92,6 +92,9 @@ Examples:
   .\run-on-docker.ps1 --ssh-string=example
   .\run-on-docker.ps1 --ssh-string=example --delete-volume=no
 
+Remote deploy (--ssh-string): builds images locally, exports them, uploads to the
+server, loads them there, and starts compose without a remote build.
+
 Requires docker-compose.yml and Dockerfile in the repo root.
 Web UI: http://localhost:8082  |  API: http://localhost:8080
 '@ -ForegroundColor Cyan
@@ -649,6 +652,7 @@ try {
     }
     else {
         Write-Host "Stack is running on remote host at $workDir (network: $networkValue, api: ${apiHostValue}:${apiPortValue})." -ForegroundColor Green
+        Write-Host ("Images were built locally and deployed to {0} without a remote build." -f $target.SshAlias) -ForegroundColor Green
     }
 }
 catch {

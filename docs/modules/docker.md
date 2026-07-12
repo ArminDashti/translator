@@ -43,7 +43,7 @@ Builds images via `docker compose build`. Image tags come from `.docker/stack.ma
 
 **Local:** `docker compose build` then `docker compose up -d`.
 
-**Remote:** builds images locally, `docker save` both tags, transfers tarball + compose files to `/opt/docker/translator`, loads images, runs compose without remote build.
+**Remote (`--ssh-string`):** builds images locally first, `docker save` to a tarball, transfers the archive plus compose files to `/opt/docker/translator`, runs `docker load` on the server, then starts compose without a remote build.
 
 Set `JWT_SECRET` in the environment before running if you need a non-default secret (compose default is for local dev only).
 
