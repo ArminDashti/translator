@@ -509,22 +509,39 @@ function Set-ComposeEnvironment {
     param(
         [string]$NetworkName,
         [string]$ApiHostName,
-        [string]$ApiPortNumber
+        [string]$ApiPortNumber,
+        [bool]$PublishHostPorts = $true
     )
 
     $env:DOCKER_NETWORK = $NetworkName
     $env:API_HOST = $ApiHostName
     $env:API_PORT = $ApiPortNumber
+
+    if ($PublishHostPorts) {
+        Remove-Item Env:API_PUBLISH_PORT -ErrorAction SilentlyContinue
+        Remove-Item Env:WEB_PUBLISH_PORT -ErrorAction SilentlyContinue
+        Remove-Item Env:POSTGRES_PUBLISH_PORT -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:API_PUBLISH_PORT = ''
+        $env:WEB_PUBLISH_PORT = ''
+        $env:POSTGRES_PUBLISH_PORT = ''
+    }
 }
 
 function Get-RemoteComposeEnvironmentPrefix {
     param(
         [string]$NetworkName,
         [string]$ApiHostName,
-        [string]$ApiPortNumber
+        [string]$ApiPortNumber,
+        [bool]$PublishHostPorts = $false
     )
 
-    return "DOCKER_NETWORK='$NetworkName' API_HOST='$ApiHostName' API_PORT='$ApiPortNumber' "
+    $prefix = "DOCKER_NETWORK='$NetworkName' API_HOST='$ApiHostName' API_PORT='$ApiPortNumber' "
+    if (-not $PublishHostPorts) {
+        $prefix += "API_PUBLISH_PORT='' WEB_PUBLISH_PORT='' POSTGRES_PUBLISH_PORT='' "
+    }
+    return $prefix
 }
 
 function Get-RemoteWorkDir {
@@ -605,7 +622,7 @@ function Invoke-ComposeStack {
     if ($Profile.IsLocal) {
         Push-Location $WorkingDirectory
         try {
-            Set-ComposeEnvironment -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber
+            Set-ComposeEnvironment -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber -PublishHostPorts:$Profile.IsLocal
             Invoke-Expression $composeDown | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host 'Compose down skipped or partial (stack may not exist yet).' -ForegroundColor DarkYellow
@@ -626,7 +643,7 @@ function Invoke-ComposeStack {
         Write-Host "Compose down skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
 
-    $envPrefix = Get-RemoteComposeEnvironmentPrefix -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber
+    $envPrefix = Get-RemoteComposeEnvironmentPrefix -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber -PublishHostPorts:$Profile.IsLocal
     Invoke-RemoteShell -Profile $Profile -Command "${envPrefix}$composeUp" -WorkingDirectory $WorkingDirectory
 }
 
