@@ -45,15 +45,17 @@ function Show-BuildDockerImageHelp {
 translator Docker build - build API and/or web images
 
 Usage:
-  .\build-docker-image.ps1 [--target=<api|web|all>] [--no-cache=<no|yes>] [--compose-file=<path>]
+  .\build-docker-image.ps1 [--target=<api|web|all>] [--no-cache=<no|yes>] [--compose-file=<path>] [--help]
 
 Arguments:
   --target=<api|web|all>      Image(s) to build (default: all)
   --no-cache=<no|yes>         Rebuild without Docker cache (default: no)
   --compose-file=<path>       Compose file in repo root (default: docker-compose.yml)
+  --help, -h                  Show this help message and exit
 
 Examples:
   .\build-docker-image.ps1
+  .\build-docker-image.ps1 --help
   .\build-docker-image.ps1 --target=api
   .\build-docker-image.ps1 --target=web --no-cache=yes
 
@@ -122,6 +124,11 @@ function Merge-CliArguments {
         $argument = $RemainingArguments[$index]
         if ($argument -match '^--?(?<name>[\w-]+)(?:=(?<value>.*))?$') {
             $normalizedKey = ($Matches['name'] -replace '-', '_').ToLowerInvariant()
+            if ($normalizedKey -in @('help', 'h')) {
+                $merged['help'] = $true
+                $index++
+                continue
+            }
             if ($null -ne $Matches['value'] -and $Matches['value'] -ne '') {
                 $merged[$normalizedKey] = Remove-SurroundingQuotes -Value $Matches['value']
                 $index++
@@ -135,7 +142,7 @@ function Merge-CliArguments {
                 $index++
             }
         }
-        elseif ($argument -match '^(-help|-\?|/\?)$') {
+        elseif ($argument -match '^(-h|-help|--help|-\?|/\?)$') {
             $merged['help'] = $true
             $index++
         }
