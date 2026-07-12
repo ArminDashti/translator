@@ -73,7 +73,7 @@ function Show-RunOnDockerHelp {
 translator Docker run - build API + web images and start the Compose stack
 
 Usage:
-  .\run-on-docker.ps1 [--ssh-string=<connection>] [--delete-volume=<no|yes>] [--network=<name>] [--api-host=<name>] [--api-port=<port>]
+  .\run-on-docker.ps1 [--ssh-string=<connection>] [--delete-volume=<no|yes>] [--network=<name>] [--api-host=<name>] [--api-port=<port>] [--help]
 
 Arguments:
   --ssh-string=<connection>   Remote target, e.g. "ssh server-name",
@@ -84,9 +84,11 @@ Arguments:
   --network=<name>            Docker network for the stack (default: translator-net)
   --api-host=<name>           API container hostname on that network (default: translator)
   --api-port=<port>           API port on that network for /api proxy (default: 8080)
+  --help, -h                  Show this help message and exit
 
 Examples:
   .\run-on-docker.ps1
+  .\run-on-docker.ps1 --help
   .\run-on-docker.ps1 --delete-volume=yes
   .\run-on-docker.ps1 --network=translator-net --api-port=8080
   .\run-on-docker.ps1 --ssh-string="ssh myvps"
@@ -157,6 +159,11 @@ function Merge-CliArguments {
         $argument = $RemainingArguments[$index]
         if ($argument -match '^--?(?<name>[\w-]+)(?:=(?<value>.*))?$') {
             $normalizedKey = ($Matches['name'] -replace '-', '_').ToLowerInvariant()
+            if ($normalizedKey -in @('help', 'h')) {
+                $merged['help'] = $true
+                $index++
+                continue
+            }
             if ($null -ne $Matches['value'] -and $Matches['value'] -ne '') {
                 $merged[$normalizedKey] = Remove-SurroundingQuotes -Value $Matches['value']
                 $index++
@@ -170,7 +177,7 @@ function Merge-CliArguments {
                 $index++
             }
         }
-        elseif ($argument -match '^(-help|-\?|/\?)$') {
+        elseif ($argument -match '^(-h|-help|--help|-\?|/\?)$') {
             $merged['help'] = $true
             $index++
         }
@@ -647,7 +654,7 @@ function Invoke-ComposeStack {
     Invoke-RemoteShell -Profile $Profile -Command "${envPrefix}$composeUp" -WorkingDirectory $WorkingDirectory
 }
 
-if ($Help -or $SshString -match '^(-help|--help|-\?|/\?)$') {
+if ($Help -or $SshString -match '^(-h|-help|--help|-\?|/\?)$') {
     Show-RunOnDockerHelp
     Get-Help $PSCommandPath -Full
     exit 0
