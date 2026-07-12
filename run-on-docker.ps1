@@ -3,12 +3,28 @@
     Build and run the translator Docker stack locally or on a remote host via SSH.
 
 .DESCRIPTION
-    Uses docker-compose.yml from the project root. Builds API and web images, then
-    starts postgres, api, and web on an external Docker network. When --ssh-string
-    is omitted, Docker on localhost is used. When --ssh-string is set, images are
-    built locally, exported, transferred to the remote host, loaded there, and
-    started without rebuilding on the server. When --delete-volume=yes, existing
-    containers and named volumes are removed before start.
+    Uses the repo-root Dockerfile (multi-target), docker-compose.yml, and nginx.conf.template.
+    Builds both API and web images, then starts the full stack. When --ssh-string is omitted,
+    the local Docker daemon is used. When --ssh-string is set, images are built locally,
+    exported, transferred to the remote host, loaded there, and compose is started without
+    a remote build. When --delete-volume=yes, existing compose volumes are removed before
+    the stack is recreated.
+
+.PARAMETER SshString
+    SSH config alias for remote Docker (e.g. example). The script prepends "ssh"
+    when connecting; do not include "ssh" in the value. When omitted, localhost Docker is used.
+
+.PARAMETER DeleteVolume
+    Whether to remove data volumes before starting. Default: no.
+
+.PARAMETER DockerNetwork
+    Docker network name attached to the stack. Default: translator-net.
+
+.PARAMETER ApiHost
+    API container hostname on the Docker network. Default: translator.
+
+.PARAMETER ApiPort
+    API port reachable on the Docker network for the web /api proxy. Default: 8080.
 
 .EXAMPLE
     .\run-on-docker.ps1
@@ -20,7 +36,7 @@
     .\run-on-docker.ps1 --ssh-string=myvps
 
 .EXAMPLE
-    .\run-on-docker.ps1 --ssh-string=production --delete-volume=no
+    .\ run-on-docker.ps1 --ssh-string=example --delete-volume=no
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -92,23 +108,29 @@ function Show-RunOnDockerHelp {
 translator Docker run - build API + web images and start the Compose stack
 
 Usage:
-  .\run-on-docker.ps1 [--ssh-string=<alias>] [--delete-volume=<no|yes>] [--network=<name>] [--api-host=<name>] [--api-port=<port>]
+  .\run-on-docker.ps1 [--ssh-string=<alias>] [--delete-volume=<no|yes>] [--network=<name>] [--api-host=<name>] [--api-port=<port>] [--help]
 
 Arguments:
-  --ssh-string=<alias>        SSH config alias for remote Docker (e.g. myvps)
+  --ssh-string=<alias>        SSH config alias for remote Docker (e.g. example)
                               The script prepends "ssh" when connecting; do not include "ssh"
-                              in the value. Builds locally, transfers images, then starts
-                              the stack remotely. When omitted, localhost Docker is used.
+                              in the value. Builds images locally, transfers them to the server,
+                              then starts compose remotely. When omitted, localhost Docker is used.
   --delete-volume=<no|yes>    Remove named volumes before starting (default: no)
   --network=<name>            Docker network for the stack (default: translator-net)
   --api-host=<name>           API container hostname on that network (default: translator)
   --api-port=<port>           API port on that network for /api proxy (default: 8080)
+  --help, -h                  Show this help message and exit
 
 Examples:
   .\run-on-docker.ps1
+  .\run-on-docker.ps1 --help
   .\run-on-docker.ps1 --delete-volume=yes
-  .\run-on-docker.ps1 --ssh-string=myvps
-  .\run-on-docker.ps1 --ssh-string=production --delete-volume=no
+  .\ run-on-docker.ps1 --network=translator-net --api-port=8080
+  .\ run-on-docker.ps1 --ssh-string=example
+  .\ run-on-docker.ps1 --ssh-string=example --delete-volume=no
+
+Remote deploy (--ssh-string): builds images locally, exports them, uploads to the
+server, loads them there, and starts compose without a remote build.
 
 Web UI: http://localhost:8082  |  API: http://localhost:8080
 '@ -ForegroundColor Cyan
@@ -175,7 +197,254 @@ function Resolve-SshAlias {
         throw 'Invalid --ssh-string value. Example: --ssh-string=myvps'
     }
 
-    return $alias
+    $index = 0
+    while ($index -lt $RemainingArguments.Count) {
+        $argument = $RemainingArguments[$index]
+        if ($argument -match '^--?(?<name>[\w-]+)(?:=(?<value>.*))?$') {
+            $normalizedKey = ($Matches['name'] -replace '-', '_').ToLowerInvariant()
+            if ($normalizedKey -in @('help', 'h')) {
+                $merged['help'] = $true
+                $index++
+                continue
+            }
+            if ($null -ne $Matches['value'] -and $Matches['value'] -ne '') {
+                $merged[$normalizedKey] = Remove-SurroundingQuotes -Value $Matches['value']
+                $index++
+            }
+            elseif (($index + 1) -lt $RemainingArguments.Count -and $RemainingArguments[$index + 1] -notmatch '^-') {
+                $merged[$normalizedKey] = Remove-SurroundingQuotes -Value $RemainingArguments[$index + 1]
+                $index += 2
+            }
+            else {
+                $merged[$normalizedKey] = $true
+                $index++
+            }
+        }
+        elseif ($argument -match '^(-h|-help|--help|-\?|/?\?)$') {
+            $merged['help'] = $true
+            $index++
+        }
+        else {
+            throw "Unknown argument: '$argument'. Run with --help."
+        }
+    }
+    return $merged
+}
+
+function Test-Truthy {
+    param([string]$Value)
+
+    switch ($Value.ToLowerInvariant()) {
+        { $_ -in @('yes', 'true', '1', 'y', 'on') } { return $true }
+        default { return $false }
+    }
+}
+
+function Write-RunStep {
+    param(
+        [int]$Step,
+        [int]$Total,
+        [string]$Message
+    )
+
+    $percent = [math]::Round(($Step / $Total) * 100)
+    Write-Progress -Activity 'translator Docker run' -Status $Message -PercentComplete $percent
+    Write-Host ("[{0}/{1}] {2}" -f $Step, $Total, $Message) -ForegroundColor Yellow
+}
+
+function Resolve-SshTarget {
+    param([string]$SshString)
+
+    if ([string]::IsNullOrWhiteSpace($SshString)) {
+        return [pscustomobject]@{
+            IsLocal  = $true
+            SshAlias = $null
+        }
+    }
+
+    $alias = $SshString.Trim()
+
+    if ($alias -match '^(?i)ssh(\s|$)') {
+        throw 'Invalid --ssh-string value. Pass only the SSH config alias (e.g. --ssh-string=example). Do not include "ssh".'
+    }
+
+    if ([string]::IsNullOrWhiteSpace($alias)) {
+        throw 'Invalid --ssh-string value. Example: --ssh-string=example'
+    }
+
+    return [pscustomobject]@{
+        IsLocal  = $false
+        SshAlias = $alias
+    }
+}
+
+function Invoke-RemoteShell {
+    param(
+        [pscustomobject]$Target,
+        [string]$Command,
+        [string]$WorkingDirectory = $null
+    )
+
+    $remoteCommand = if ($WorkingDirectory) { "cd '$WorkingDirectory' && $Command" } else { $Command }
+
+    if ($Target.IsLocal) {
+        if ($WorkingDirectory) {
+            Push-Location $WorkingDirectory
+            try { Invoke-Expression $Command | Out-Null }
+            finally { Pop-Location }
+        }
+        else {
+            Invoke-Expression $Command | Out-Null
+        }
+        if ($LASTEXITCODE -ne 0) { throw "Command failed (exit $LASTEXITCODE): $Command" }
+        return
+    }
+
+    & ssh $Target.SshAlias $remoteCommand
+    if ($LASTEXITCODE -ne 0) { throw "Remote command failed (exit $LASTEXITCODE): $remoteCommand" }
+}
+
+function Test-DockerCliAvailable {
+    param([pscustomobject]$Target = $null)
+
+    if ($null -eq $Target -or $Target.IsLocal) {
+        & docker version | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Docker CLI is not available or not running.' }
+        return
+    }
+
+    Invoke-RemoteShell -Target $Target -Command 'docker version'
+}
+
+function Copy-FileToRemote {
+    param(
+        [pscustomobject]$Target,
+        [string]$LocalPath,
+        [string]$RemotePath
+    )
+
+    & scp -o StrictHostKeyChecking=accept-new $LocalPath "$($Target.SshAlias):$RemotePath"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to copy '$LocalPath' to remote." }
+}
+
+function Sync-DeployFilesToRemote {
+    param(
+        [pscustomobject]$Target,
+        [string]$LocalRoot,
+        [string]$RemotePath
+    )
+
+    Invoke-RemoteShell -Target $Target -Command "mkdir -p '$RemotePath' '$RemotePath/.docker'"
+
+    foreach ($relativePath in $Script:DeploySyncFiles) {
+        $localPath = Join-Path $LocalRoot $relativePath
+        if (-not (Test-Path $localPath)) {
+            throw "Missing deploy file: $relativePath"
+        }
+
+        $remoteTarget = if ($relativePath -like '.docker/*') {
+            "$RemotePath/$relativePath"
+        }
+        else {
+            "$RemotePath/"
+        }
+
+        Copy-FileToRemote -Target $Target -LocalPath $localPath -RemotePath $remoteTarget
+    }
+}
+
+function Get-StackManifest {
+    param([string]$ProjectRoot)
+
+    $manifestPath = Join-Path $ProjectRoot '.docker/stack.manifest.json'
+    if (-not (Test-Path $manifestPath)) { return $null }
+    return Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+}
+
+function Get-StackImageTags {
+    param([string]$ProjectRoot)
+
+    $defaults = @{
+        ApiImageTag = 'translator-api:latest'
+        WebImageTag = 'translator-web:latest'
+    }
+
+    $manifest = Get-StackManifest -ProjectRoot $ProjectRoot
+    if ($manifest) {
+        if ($manifest.apiImageTag) { $defaults.ApiImageTag = [string]$manifest.apiImageTag }
+        elseif ($manifest.imageTag) { $defaults.ApiImageTag = [string]$manifest.imageTag }
+        if ($manifest.webImageTag) { $defaults.WebImageTag = [string]$manifest.webImageTag }
+    }
+
+    return [pscustomobject]$defaults
+}
+
+function Get-ImageArchiveName {
+    param([string]$StackName)
+
+    return ($StackName -replace '[^a-zA-Z0-9._-]', '-') + '-images.tar'
+}
+
+function Build-LocalDockerImages {
+    param([string]$ProjectRoot)
+
+    Push-Location $ProjectRoot
+    try {
+        & docker compose -f $Script:ComposeFile build
+        if ($LASTEXITCODE -ne 0) { throw "docker compose build failed (exit $LASTEXITCODE)" }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Export-LocalDockerImages {
+    param(
+        [string[]]$ImageTags,
+        [string]$ArchivePath
+    )
+
+    $parentDirectory = Split-Path -Parent $ArchivePath
+    if (-not (Test-Path -LiteralPath $parentDirectory)) {
+        New-Item -ItemType Directory -Path $parentDirectory -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $ArchivePath) {
+        Remove-Item -LiteralPath $ArchivePath -Force
+    }
+
+    & docker save -o $ArchivePath @ImageTags
+    if ($LASTEXITCODE -ne 0) { throw "docker save failed (exit $LASTEXITCODE)" }
+}
+
+function Transfer-DockerImagesToRemote {
+    param(
+        [pscustomobject]$Target,
+        [string[]]$ImageTags,
+        [string]$RemotePath,
+        [string]$StackName
+    )
+
+    $archiveName = Get-ImageArchiveName -StackName $StackName
+    $localArchive = Join-Path $Script:LocalDeployDir $archiveName
+    $remoteArchive = "$RemotePath/$archiveName"
+
+    try {
+        Export-LocalDockerImages -ImageTags $ImageTags -ArchivePath $localArchive
+
+        $tarSizeMb = [math]::Round((Get-Item $localArchive).Length / 1MB, 1)
+        Write-Host "Transferring images ($tarSizeMb MB) to remote host..." -ForegroundColor Cyan
+        Copy-FileToRemote -Target $Target -LocalPath $localArchive -RemotePath $remoteArchive
+
+        Write-Host 'Loading images on remote host...' -ForegroundColor Cyan
+        Invoke-RemoteShell -Target $Target -Command "docker load -i '$remoteArchive' && rm -f '$remoteArchive'"
+        Write-Host 'Images loaded on remote host.' -ForegroundColor Green
+    }
+    finally {
+        if (Test-Path -LiteralPath $localArchive) {
+            Remove-Item -LiteralPath $localArchive -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 }
 
 function Test-PortNumber {
@@ -245,44 +514,65 @@ function Set-ComposeEnvironment {
     param(
         [string]$NetworkName,
         [string]$ApiHostName,
-        [string]$ApiPortNumber
+        [string]$ApiPortNumber,
+        [bool]$PublishHostPorts = $true
     )
 
     $env:DOCKER_NETWORK = $NetworkName
     $env:API_HOST = $ApiHostName
     $env:API_PORT = $ApiPortNumber
+
+    if ($PublishHostPorts) {
+        Remove-Item Env:API_PUBLISH_PORT -ErrorAction SilentlyContinue
+        Remove-Item Env:WEB_PUBLISH_PORT -ErrorAction SilentlyContinue
+        Remove-Item Env:POSTGRES_PUBLISH_PORT -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:API_PUBLISH_PORT = ''
+        $env:WEB_PUBLISH_PORT = ''
+        $env:POSTGRES_PUBLISH_PORT = ''
+    }
 }
 
 function Get-RemoteComposeEnvironmentPrefix {
     param(
         [string]$NetworkName,
         [string]$ApiHostName,
-        [string]$ApiPortNumber
+        [string]$ApiPortNumber,
+        [bool]$PublishHostPorts = $false
     )
 
-    return "DOCKER_NETWORK='$NetworkName' API_HOST='$ApiHostName' API_PORT='$ApiPortNumber' "
+    $prefix = "DOCKER_NETWORK='$NetworkName' API_HOST='$ApiHostName' API_PORT='$ApiPortNumber' "
+    if (-not $PublishHostPorts) {
+        $prefix += "API_PUBLISH_PORT='' WEB_PUBLISH_PORT='' POSTGRES_PUBLISH_PORT='' "
+    }
+    return $prefix
 }
 
 function Ensure-DockerNetwork {
     param(
-        [string]$CommandPrefix = '',
-        [string]$NetworkName
+        [pscustomobject]$Target,
+        [string]$NetworkName,
+        [string]$WorkingDirectory
     )
 
-    $inspectCommand = if ($CommandPrefix) {
-        "$CommandPrefix docker network inspect '$NetworkName'"
-    }
-    else {
-        "docker network inspect '$NetworkName'"
-    }
-
-    Invoke-Expression "$inspectCommand >/dev/null 2>&1" | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    if ($Target.IsLocal) {
+        $existingNetworks = docker network ls --format '{{.Name}}'
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to list Docker networks. Is Docker running?'
+        }
+        if ($existingNetworks -notcontains $NetworkName) {
+            docker network create $NetworkName | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to create Docker network '$NetworkName'."
+            }
+        }
         return
     }
 
-    $createCommand = if ($CommandPrefix) {
-        "$CommandPrefix docker network create '$NetworkName'"
+    $createCommand = "docker network inspect '$NetworkName' >/dev/null 2>&1 || docker network create '$NetworkName'"
+    try {
+        Invoke-RemoteShell -Target $Target -Command $createCommand -WorkingDirectory $WorkingDirectory
     }
     else {
         "docker network create '$NetworkName'"
@@ -351,30 +641,10 @@ function Sync-DeployFilesToRemote {
 
 function Transfer-ImagesToRemote {
     param(
-        [string]$SshAlias,
-        [string]$ArchivePath
-    )
-
-    $remoteArchivePath = '{0}:{1}/{2}' -f $SshAlias, $Script:RemoteProjectPath, $Script:ImageArchiveName
-    & scp -o StrictHostKeyChecking=accept-new $ArchivePath $remoteArchivePath
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Failed to transfer image archive to remote host.'
-    }
-}
-
-function Import-RemoteDockerImages {
-    param([string]$SshAlias)
-
-    $remoteArchivePath = '{0}/{1}' -f $Script:RemoteProjectPath, $Script:ImageArchiveName
-    Invoke-RemoteShell -SshAlias $SshAlias -Command "docker load -i '$remoteArchivePath' && rm -f '$remoteArchivePath'"
-}
-
-function Invoke-DockerComposeRun {
-    param(
-        [string]$CommandPrefix = '',
-        [string]$WorkingDirectory = $Script:ProjectRoot,
-        [bool]$DeleteVolume = $false,
-        [bool]$Build = $true,
+        [pscustomobject]$Target,
+        [string]$WorkingDirectory,
+        [bool]$RemoveVolumes,
+        [bool]$Build,
         [string]$NetworkName,
         [string]$ApiHostName,
         [string]$ApiPortNumber
@@ -388,26 +658,16 @@ function Invoke-DockerComposeRun {
         "docker compose -f $Script:ComposeFile down"
     }
 
-    if ($DeleteVolume) {
-        $composeDown += ' -v'
-    }
-
-    $composeUp = if ($CommandPrefix) {
-        "${envPrefix}$CommandPrefix docker compose -f $Script:ComposeFile up -d"
-    }
-    else {
-        Set-ComposeEnvironment -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber
-        "docker compose -f $Script:ComposeFile up -d"
-    }
-
-    if ($Build) {
-        $composeUp += ' --build'
-    }
-
-    Push-Location $WorkingDirectory
-    try {
-        if (-not $CommandPrefix) {
-            Set-ComposeEnvironment -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber
+    if ($Target.IsLocal) {
+        Push-Location $WorkingDirectory
+        try {
+            Set-ComposeEnvironment -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber -PublishHostPorts:$Target.IsLocal
+            Invoke-Expression $composeDown | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host 'Compose down skipped or partial (stack may not exist yet).' -ForegroundColor DarkYellow
+            }
+            Invoke-Expression $composeUp | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed.' }
         }
 
         Invoke-Expression $composeDown | Out-Null
@@ -488,17 +748,97 @@ function Invoke-RemoteDockerRun {
     }
 
     try {
-        Invoke-RemoteShell -SshAlias $SshAlias -Command $composeDown -WorkingDirectory $Script:RemoteProjectPath
+        Invoke-RemoteShell -Target $Target -Command $composeDown -WorkingDirectory $WorkingDirectory
     }
     catch {
         Write-Host 'Remote compose down skipped or partial (stack may not exist yet).' -ForegroundColor DarkYellow
     }
 
-    $envPrefix = Get-RemoteComposeEnvironmentPrefix -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber
-    Invoke-RemoteShell -SshAlias $SshAlias -Command "${envPrefix}docker compose -f $Script:ComposeFile up -d" -WorkingDirectory $Script:RemoteProjectPath
+    $envPrefix = Get-RemoteComposeEnvironmentPrefix -NetworkName $NetworkName -ApiHostName $ApiHostName -ApiPortNumber $ApiPortNumber -PublishHostPorts:$Target.IsLocal
+    Invoke-RemoteShell -Target $Target -Command "${envPrefix}$composeUp" -WorkingDirectory $WorkingDirectory
+}
 
-    if (Test-Path -LiteralPath $archivePath) {
-        Remove-Item -LiteralPath $archivePath -Force
+if ($Help -or $SshString -match '^(-h|-help|--help|-\?|/?\?)$') {
+    Show-RunOnDockerHelp
+    Get-Help $PSCommandPath -Full
+    exit 0
+}
+
+$cliArgs = Merge-CliArguments -BoundParameters $PSBoundParameters -RemainingArguments $RemainingArguments
+if ($cliArgs['help']) {
+    Show-RunOnDockerHelp
+    Get-Help $PSCommandPath -Full
+    exit 0
+}
+
+$sshStringValue = if ($cliArgs['ssh_string']) { [string]$cliArgs['ssh_string'] } else { [string]$SshString }
+$sshStringValue = Normalize-CliParameterValue -Name 'ssh_string' -Value $sshStringValue
+$deleteVolumeValue = if ($cliArgs['delete_volume']) { [string]$cliArgs['delete_volume'] } else { [string]$DeleteVolume }
+$deleteVolumeValue = Normalize-CliParameterValue -Name 'delete_volume' -Value $deleteVolumeValue
+$networkValue = if ($cliArgs['network']) { [string]$cliArgs['network'] } else { [string]$DockerNetwork }
+$networkValue = Normalize-CliParameterValue -Name 'network' -Value $networkValue
+$removeVolumes = Test-Truthy -Value $deleteVolumeValue
+
+$ProjectRoot = $PSScriptRoot
+$manifestDefaults = Get-DockerManifestDefaults -ProjectRoot $ProjectRoot
+$apiHostValue = if ($cliArgs['api_host']) { [string]$cliArgs['api_host'] } elseif (-not [string]::IsNullOrWhiteSpace($ApiHost)) { [string]$ApiHost } else { $manifestDefaults.ApiHost }
+$apiHostValue = Normalize-CliParameterValue -Name 'api_host' -Value $apiHostValue
+$apiPortValue = if ($cliArgs['api_port']) { [string]$cliArgs['api_port'] } elseif (-not [string]::IsNullOrWhiteSpace($ApiPort)) { [string]$ApiPort } else { $manifestDefaults.ApiPort }
+$apiPortValue = Normalize-CliParameterValue -Name 'api_port' -Value $apiPortValue
+
+if ([string]::IsNullOrWhiteSpace($networkValue)) {
+    throw 'Invalid --network value. Example: --network=translator-net'
+}
+if ([string]::IsNullOrWhiteSpace($apiHostValue)) {
+    throw 'Invalid --api-host value. Example: --api-host=translator'
+}
+Test-PortNumber -Value $apiPortValue -ParameterName '--api-port'
+
+$target = Resolve-SshTarget -SshString $sshStringValue
+$workDir = if ($target.IsLocal) { $ProjectRoot } else { Get-RemoteWorkDir -ProjectRoot $ProjectRoot }
+$imageTags = Get-StackImageTags -ProjectRoot $ProjectRoot
+$stackManifest = Get-StackManifest -ProjectRoot $ProjectRoot
+$stackName = if ($stackManifest -and $stackManifest.stackName) { [string]$stackManifest.stackName } else { 'translator' }
+
+$targetLabel = if ($target.IsLocal) { 'localhost' } else { "ssh $($target.SshAlias)" }
+$volumeAction = if ($removeVolumes) { 'removing volumes' } else { 'keeping volumes' }
+$totalSteps = if ($target.IsLocal) { 4 } else { 7 }
+
+try {
+    $deployMode = if ($target.IsLocal) { 'local Docker' } else { 'local build + image transfer' }
+    Write-Host ("Target: {0} ({1}) | network: {2} | api: {3}:{4} | images: {5}, {6} | {7}" -f `
+        $targetLabel, $deployMode, $networkValue, $apiHostValue, $apiPortValue, `
+        $imageTags.ApiImageTag, $imageTags.WebImageTag, $volumeAction) -ForegroundColor Cyan
+
+    Write-RunStep -Step 1 -Total $totalSteps -Message 'Checking Docker files'
+    Test-DockerComposeFile -ProjectRoot $ProjectRoot
+    Test-DockerCliAvailable -Target $target
+
+    Write-RunStep -Step 2 -Total $totalSteps -Message 'Building API and web images'
+    Build-LocalDockerImages -ProjectRoot $ProjectRoot
+
+    if ($target.IsLocal) {
+        Write-RunStep -Step 3 -Total $totalSteps -Message "Ensuring Docker network '$networkValue'"
+        Ensure-DockerNetwork -Target $target -NetworkName $networkValue -WorkingDirectory $workDir
+
+        Write-RunStep -Step 4 -Total $totalSteps -Message $(if ($removeVolumes) { 'Recreating stack (volumes removed)' } else { 'Recreating stack (keeping volumes)' })
+        Invoke-ComposeStack -Target $target -WorkingDirectory $workDir -RemoveVolumes:$removeVolumes -Build:$false -NetworkName $networkValue -ApiHostName $apiHostValue -ApiPortNumber $apiPortValue
+    }
+    else {
+        Write-RunStep -Step 3 -Total $totalSteps -Message "Syncing compose files to $targetLabel"
+        Sync-DeployFilesToRemote -Target $target -LocalRoot $ProjectRoot -RemotePath $workDir
+
+        Write-RunStep -Step 4 -Total $totalSteps -Message 'Transferring images to remote host'
+        Transfer-DockerImagesToRemote -Target $target -ImageTags @($imageTags.ApiImageTag, $imageTags.WebImageTag) -RemotePath $workDir -StackName $stackName
+
+        Write-RunStep -Step 5 -Total $totalSteps -Message 'Checking remote Docker'
+        Test-DockerCliAvailable -Target $target
+
+        Write-RunStep -Step 6 -Total $totalSteps -Message "Ensuring Docker network '$networkValue'"
+        Ensure-DockerNetwork -Target $target -NetworkName $networkValue -WorkingDirectory $workDir
+
+        Write-RunStep -Step 7 -Total $totalSteps -Message $(if ($removeVolumes) { 'Recreating stack (volumes removed)' } else { 'Recreating stack (keeping volumes)' })
+        Invoke-ComposeStack -Target $target -WorkingDirectory $workDir -RemoveVolumes:$removeVolumes -Build:$false -NetworkName $networkValue -ApiHostName $apiHostValue -ApiPortNumber $apiPortValue
     }
 
     Write-Progress -Activity 'translator Docker run' -Completed -Status 'Done'
@@ -507,37 +847,14 @@ function Invoke-RemoteDockerRun {
     Write-Host ("Remote path: {0}" -f $Script:RemoteProjectPath) -ForegroundColor Green
 }
 
-Initialize-RunSettings
-
-$argumentMap = ConvertTo-RunArguments -RawArguments $args
-if ($argumentMap['help']) {
-    Show-RunOnDockerHelp
-    exit 0
-}
-
-$deleteVolume = Test-DeleteVolumeEnabled -Value $argumentMap['delete_volume']
-$sshString = $argumentMap['ssh_string']
-$networkName = if ($argumentMap['network']) { $argumentMap['network'] } else { $Script:DockerNetwork }
-$apiHostName = if ($argumentMap['api_host']) { $argumentMap['api_host'] } else { $Script:ApiHost }
-$apiPortNumber = if ($argumentMap['api_port']) { $argumentMap['api_port'] } else { $Script:ApiPort }
-
-if ([string]::IsNullOrWhiteSpace($networkName)) {
-    throw 'Invalid --network value. Example: --network=translator-net'
-}
-if ([string]::IsNullOrWhiteSpace($apiHostName)) {
-    throw 'Invalid --api-host value. Example: --api-host=translator'
-}
-Test-PortNumber -Value $apiPortNumber -ParameterName '--api-port'
-
-try {
-    if ([string]::IsNullOrWhiteSpace($sshString)) {
-        Write-Host 'Target: localhost Docker' -ForegroundColor Cyan
-        Invoke-LocalDockerRun -DeleteVolume:$deleteVolume -NetworkName $networkName -ApiHostName $apiHostName -ApiPortNumber $apiPortNumber
+    if ($target.IsLocal) {
+        Write-Host 'Stack is running on localhost.' -ForegroundColor Green
+        Write-Host '  Web UI: http://localhost:8082' -ForegroundColor Green
+        Write-Host '  API:    http://localhost:8080' -ForegroundColor Green
     }
     else {
-        $sshAlias = Resolve-SshAlias -SshString $sshString
-        Write-Host ("Target: remote Docker via ssh {0} (local build + image transfer)" -f $sshAlias) -ForegroundColor Cyan
-        Invoke-RemoteDockerRun -SshAlias $sshAlias -DeleteVolume:$deleteVolume -NetworkName $networkName -ApiHostName $apiHostName -ApiPortNumber $apiPortNumber
+        Write-Host "Stack is running on remote host at $workDir (network: $networkValue, api: ${apiHostValue}:${apiPortValue})." -ForegroundColor Green
+        Write-Host ("Images were built locally and deployed to {0} without a remote build." -f $target.SshAlias) -ForegroundColor Green
     }
 }
 catch {

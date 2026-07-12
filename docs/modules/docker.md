@@ -35,7 +35,7 @@ Builds images via `docker compose build`. Image tags come from `.docker/stack.ma
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--ssh-string` | — | SSH config alias (e.g. `myvps`); omit for local Docker |
+| `--ssh-string` | — | SSH config alias only (script prepends `ssh`); omit for local Docker |
 | `--delete-volume` | `no` | `yes` removes volumes before recreate |
 | `--network` | `translator-net` | Docker network name |
 | `--api-host` | `translator` | API hostname for nginx proxy |
@@ -43,7 +43,7 @@ Builds images via `docker compose build`. Image tags come from `.docker/stack.ma
 
 **Local:** ensures `translator-net`, then `docker compose down` and `docker compose up -d --build`.
 
-**Remote:** builds images locally, `docker save` both tags, transfers tarball + deploy files to `/opt/docker/translator`, loads images, ensures the network, runs compose without remote build. Pass only the SSH config alias (e.g. `--ssh-string=myvps`), not a full `ssh` command.
+**Remote (`--ssh-string`):** builds images locally first, `docker save` to a tarball, transfers the archive plus compose files to `/opt/docker/translator`, runs `docker load` on the server, then starts compose without a remote build. Pass only the SSH config alias (e.g. `--ssh-string=myvps`), not a full `ssh` command.
 
 Set `JWT_SECRET` in the environment before running if you need a non-default secret (compose default is for local dev only).
 
