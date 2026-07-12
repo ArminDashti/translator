@@ -25,5 +25,6 @@ translator/
 ├── run-on-docker.ps1               # Build and deploy Docker stack (local or SSH)
 ├── .dockerignore                   # Docker build context exclusions
 ├── go.mod                          # Go module definition
+├── db.md                           # PostgreSQL table and enum reference
 └── README.md                       # Setup and usage guide
 ```
