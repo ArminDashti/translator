@@ -1,6 +1,7 @@
 ---
 name: code-removal
-description: Safely removes dead or orphan code — symbols, imports, files, or blocks with no connections to live code. Use when the user asks to remove unused, dead, unreachable, or orphaned code; clean up unused imports; or delete files/modules with zero references.
+description: |
+  Safely removes dead or orphan code — symbols, imports, files, or blocks with no connections to live code. Use when the user asks to remove unused, dead, unreachable, or orphaned code; clean up unused imports; or delete files/modules with zero references.
 ---
 
 # Code Removal (Dead / Orphan Only)

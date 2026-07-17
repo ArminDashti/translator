@@ -1,5 +1,5 @@
 ---
-name: db-docs
+name: document-database
 description: Creates or updates db.md database schema documentation using simple markdown tables. Use when the user asks for db.md, database table docs, schema reference, or documenting tables/columns/indexes/enums from migrations or models.
 ---
 
